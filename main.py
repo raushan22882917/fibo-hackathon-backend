@@ -1382,14 +1382,19 @@ async def download_youtube_audio(request: YouTubeDownloadRequest):
     try:
         print(f"🎵 Downloading audio from YouTube: {request.url}")
         
+        # Validate URL format
+        if not any(domain in request.url for domain in ['youtube.com', 'youtu.be']):
+            raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+        
         # Create temp directory
         temp_dir = tempfile.mkdtemp()
-        output_path = os.path.join(temp_dir, "audio.mp3")
+        print(f"📁 Created temp directory: {temp_dir}")
         
         try:
             import yt_dlp
+            print("✅ yt-dlp imported successfully")
             
-            # Configure yt-dlp options
+            # Configure yt-dlp options with better error handling
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'postprocessors': [{
@@ -1398,25 +1403,46 @@ async def download_youtube_audio(request: YouTubeDownloadRequest):
                     'preferredquality': '192',
                 }],
                 'outtmpl': os.path.join(temp_dir, 'audio.%(ext)s'),
-                'quiet': True,
-                'no_warnings': True,
+                'quiet': False,  # Enable logging for debugging
+                'no_warnings': False,
+                'extract_flat': False,
+                'writethumbnail': False,
+                'writeinfojson': False,
             }
+            
+            print("🔧 Configured yt-dlp options")
             
             # Download audio
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                print("📥 Starting download...")
                 info = ydl.extract_info(request.url, download=True)
                 title = info.get('title', 'Unknown')
                 duration = info.get('duration', 0)
                 uploader = info.get('uploader', 'Unknown')
+                print(f"📋 Video info: {title} by {uploader} ({duration}s)")
+            
+            # Find the downloaded file (it might have a different name)
+            audio_files = [f for f in os.listdir(temp_dir) if f.endswith('.mp3')]
+            if not audio_files:
+                # Try other audio formats
+                audio_files = [f for f in os.listdir(temp_dir) if f.endswith(('.mp3', '.m4a', '.webm', '.ogg'))]
+            
+            if not audio_files:
+                raise Exception(f"No audio file found in {temp_dir}. Files: {os.listdir(temp_dir)}")
+            
+            audio_file_path = os.path.join(temp_dir, audio_files[0])
+            print(f"📄 Found audio file: {audio_files[0]}")
             
             # Read the downloaded file
-            if not os.path.exists(output_path):
-                raise Exception("Audio file not found after download")
-            
-            with open(output_path, "rb") as f:
+            with open(audio_file_path, "rb") as f:
                 audio_data = f.read()
             
-            # Convert to base64
+            print(f"📊 Audio file size: {len(audio_data)} bytes")
+            
+            # Convert to base64 (limit size for response)
+            if len(audio_data) > 50 * 1024 * 1024:  # 50MB limit
+                raise Exception("Audio file too large (>50MB)")
+            
             audio_base64 = base64.b64encode(audio_data).decode('utf-8')
             
             # Cleanup
@@ -1433,12 +1459,20 @@ async def download_youtube_audio(request: YouTubeDownloadRequest):
                 "file_size": len(audio_data)
             }
             
-        except ImportError:
+        except ImportError as e:
+            print(f"❌ Import error: {str(e)}")
             raise HTTPException(
                 status_code=500, 
-                detail="yt-dlp not installed. Install with: pip install yt-dlp"
+                detail=f"yt-dlp not available: {str(e)}"
             )
+        except Exception as e:
+            print(f"❌ Download error: {str(e)}")
+            # Cleanup on error
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise e
         
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ YouTube download error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"YouTube download failed: {str(e)}")
